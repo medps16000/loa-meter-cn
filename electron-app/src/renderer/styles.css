@@ -1,0 +1,52 @@
+:root {
+  color-scheme: dark;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #12141a;
+  color: #e8eaef;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button {
+  background: #2b3242;
+  color: inherit;
+  border: 1px solid #3d465c;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #36405a;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #2a3140;
+  text-align: left;
+}
+
+th {
+  color: #9aa3b8;
+  font-weight: 600;
+}
+
+.muted {
+  color: #8b93a7;
+}
+
+.error {
+  color: #ff8f8f;
+}

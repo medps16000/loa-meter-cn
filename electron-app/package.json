@@ -1,0 +1,68 @@
+{
+  "name": "loa-meter-cn-electron",
+  "version": "0.1.1",
+  "description": "LOA METER CN Electron UI",
+  "private": true,
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "dist": "electron-vite build && electron-builder --win nsis",
+    "dist:dir": "electron-vite build && electron-builder --win --dir",
+    "preview": "electron-vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "pinia": "^2.3.1",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "electron": "^34.0.2",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.7.3",
+    "vite": "^5.4.11",
+    "vue-tsc": "^2.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "build": {
+    "appId": "cn.loa-meter.meter",
+    "productName": "LOA METER CN",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "LOA METER CN"
+    }
+  }
+}
