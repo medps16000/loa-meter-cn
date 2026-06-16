@@ -4,6 +4,7 @@ export type OverlaySettings = {
   opacity: number
   locked: boolean
   clickThrough: boolean
+  compact: boolean
 }
 
 export type MeterApi = {
@@ -14,14 +15,30 @@ export type MeterApi = {
 }
 
 export type EncountersApi = {
-  list: (limit?: number) => Promise<unknown[]>
+  list: (
+    limit?: number,
+    filters?: { raidName?: string; bossName?: string }
+  ) => Promise<unknown[]>
   get: (id: number) => Promise<unknown | null>
+  listRaidNames: () => Promise<string[]>
+  delete: (id: number) => Promise<{ ok: boolean }>
   importJsonDir: (dirPath?: string) => Promise<{
     ok: boolean
     imported: number
     path?: string
     cancelled?: boolean
   }>
+}
+
+export type ProjectionInfo = {
+  id: number
+  bossName: string
+  raidName: string | null
+  gateName: string | null
+  bossDifficulty: string | null
+  startedAt: string
+  durationSeconds: number
+  totalDamage: number
 }
 
 const meterApi: MeterApi = {
@@ -36,8 +53,11 @@ const meterApi: MeterApi = {
 }
 
 const encountersApi: EncountersApi = {
-  list: (limit?: number) => ipcRenderer.invoke('encounters:list', limit),
+  list: (limit?: number, filters?: { raidName?: string; bossName?: string }) =>
+    ipcRenderer.invoke('encounters:list', limit, filters),
   get: (id: number) => ipcRenderer.invoke('encounters:get', id),
+  listRaidNames: () => ipcRenderer.invoke('encounters:listRaidNames'),
+  delete: (id: number) => ipcRenderer.invoke('encounters:delete', id),
   importJsonDir: (dirPath?: string) => ipcRenderer.invoke('encounters:importJsonDir', dirPath)
 }
 
@@ -51,13 +71,30 @@ const overlayApi = {
   toggleLocked: () => ipcRenderer.invoke('overlay:toggleLocked') as Promise<OverlaySettings>,
   setLocked: (locked: boolean) =>
     ipcRenderer.invoke('overlay:setLocked', locked) as Promise<OverlaySettings>,
+  toggleCompact: () => ipcRenderer.invoke('overlay:toggleCompact') as Promise<OverlaySettings>,
+  setCompact: (compact: boolean) =>
+    ipcRenderer.invoke('overlay:setCompact', compact) as Promise<OverlaySettings>,
   setOpacity: (opacity: number) =>
     ipcRenderer.invoke('overlay:setOpacity', opacity) as Promise<OverlaySettings>,
   closeWindow: () => ipcRenderer.invoke('overlay:closeWindow') as Promise<{ ok: boolean }>,
+  projectEncounter: (id: number) =>
+    ipcRenderer.invoke('overlay:projectEncounter', id) as Promise<{
+      ok: boolean
+      projection?: ProjectionInfo
+    }>,
+  clearProjection: () =>
+    ipcRenderer.invoke('overlay:clearProjection') as Promise<{ ok: boolean }>,
+  getProjection: () =>
+    ipcRenderer.invoke('overlay:getProjection') as Promise<ProjectionInfo | null>,
   resizeToHeight: (height: number) =>
     ipcRenderer.invoke('overlay:resizeToHeight', height) as Promise<{ ok: boolean }>,
   setPointerPassthrough: (passThrough: boolean) => {
     ipcRenderer.send('overlay:setPointerPassthrough', passThrough)
+  },
+  setInteractiveRects: (
+    rects: Array<{ x: number; y: number; width: number; height: number }>
+  ) => {
+    ipcRenderer.send('overlay:setInteractiveRects', rects)
   },
   onSettingsChanged: (callback: (settings: OverlaySettings) => void) => {
     const listener = (_event: IpcRendererEvent, settings: OverlaySettings) => callback(settings)

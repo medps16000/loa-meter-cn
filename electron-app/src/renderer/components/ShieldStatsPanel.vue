@@ -40,7 +40,7 @@ const displayRows = computed<ShieldDisplayRow[]>(() => {
     <header class="panel-head">
       <h3>护盾统计</h3>
     </header>
-    <p v-if="!displayRows.length" class="muted">暂无护盾数据（需要后端提供护盾同步数据）。</p>
+    <p v-if="!displayRows.length" class="muted">暂无护盾数据（需要 0xDCBF 护盾同步包）。</p>
     <table v-else>
       <thead>
         <tr>

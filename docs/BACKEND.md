@@ -1,8 +1,19 @@
-# 后端说明
+# 后端接口说明
 
-本公开仓库不包含实时解析后端。
+本公开仓库只提供 UI，不提供实时解析后端。UI 通过 HTTP/SSE 读取本地后端状态，默认地址为：
 
-UI 默认读取本地后端接口：
+```text
+http://127.0.0.1:8765
+```
+
+开发时可以覆盖地址：
+
+```powershell
+$env:METER_BASE_URL = "http://127.0.0.1:8765"
+npm run dev
+```
+
+## 必要接口
 
 ```text
 GET  /state.json
@@ -11,17 +22,66 @@ POST /reset
 POST /shutdown
 ```
 
-开发时可以通过环境变量指定后端地址：
+`/state.json` 返回当前快照，`/state/stream` 使用 SSE 推送同样结构的增量状态。`/reset` 用于手动清空当前战斗，`/shutdown` 用于打包版退出时请求后端停止。
 
-```powershell
-$env:METER_BASE_URL = "http://127.0.0.1:8765"
-npm run dev
+## 常用字段
+
+UI 会容忍字段缺失，但后端至少应提供当前战斗状态和玩家聚合数据：
+
+```ts
+type MeterState = {
+  status?: string
+  raidName?: string
+  bossName?: string
+  elapsedSeconds?: number
+  totalDamage?: number
+  dps?: number
+  damageReliability?: 'reliable' | 'waiting' | 'unreliable'
+  uiRows?: PlayerRow[]
+  skillTotals?: SkillRow[]
+  sourceSkillRows?: SkillRow[]
+  bossHp?: BossHpRow[]
+}
 ```
 
-打包后的应用如果需要自动启动后端，可以提供兼容的后端二进制，并通过：
+常见扩展字段：
 
-```powershell
-$env:LOA_METER_BACKEND_EXE = "D:\path\to\LOA_METER_BACKEND.exe"
+```ts
+type PlayerRow = {
+  id?: string | number
+  name: string
+  classId?: number
+  itemLevel?: number
+  damage?: number
+  dps?: number
+  share?: number
+  critRate?: number
+  frontRate?: number
+  backRate?: number
+  shieldDamage?: number
+  stagger?: number
+  destruction?: number
+}
 ```
 
-公开仓库不提供抓包、协议解析、解密或协议映射实现。
+技能行可包含：
+
+```ts
+type SkillRow = {
+  skillId?: number
+  name: string
+  icon?: string
+  damage?: number
+  shieldDamage?: number
+  stagger?: number
+  destruction?: number
+  hits?: number
+  critRate?: number
+  frontRate?: number
+  backRate?: number
+}
+```
+
+## 打包版后端
+
+私有完整包会把后端二进制放在 Electron `resources/backend/` 下，Electron 主进程只负责启动和关闭该外置进程。公开仓库不包含该二进制，也不包含任何抓包、解密、协议解析、材料捕获或 opcode 映射代码。

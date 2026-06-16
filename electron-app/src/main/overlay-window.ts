@@ -11,17 +11,32 @@ import {
 
 const OVERLAY_MIN_WIDTH = 360
 const OVERLAY_MIN_HEIGHT = 160
+// Thumbnail/compact mode hides the tabs + footer, so it may shrink well below
+// the full-mode floor.
+const OVERLAY_COMPACT_MIN_HEIGHT = 72
 const OVERLAY_MAX_HEIGHT = 560
 const OVERLAY_DEFAULT_HEIGHT = 430
+const OVERLAY_DEFAULT_WIDTH = 560
+// 缩略模式宽度: 只放下关卡/时长 + 紧凑 DPS 列表 (= 最小宽度, 尽量少占游戏画面).
+const OVERLAY_COMPACT_WIDTH = OVERLAY_MIN_WIDTH
 const TITLE_INTERACTIVE_HEIGHT = 88
 const FOOTER_INTERACTIVE_HEIGHT = 40
+
+type InteractiveRect = { x: number; y: number; width: number; height: number }
 
 let overlayWindow: BrowserWindow | null = null
 let overlayDb: EncounterDb | null = null
 let overlaySettings: OverlaySettings = { ...DEFAULT_OVERLAY_SETTINGS }
 let lockedBounds: Rectangle | null = null
+// Full-mode width remembered when entering compact, restored on expand.
+let savedFullWidth: number | null = null
 let pointerPollTimer: ReturnType<typeof setInterval> | null = null
 let pointerPassthroughActive = false
+// Window-relative interactive regions reported by the renderer. When set, only
+// these rectangles capture the cursor in click-through mode (everything else
+// passes through). Currently this is just the top-right button group, so the
+// top-left combat info and the footer opacity hint can't be clicked by mistake.
+let interactiveRects: InteractiveRect[] = []
 
 export function bindOverlayDatabase(db: EncounterDb): void {
   overlayDb = db
@@ -51,11 +66,17 @@ function persistSettings(patch: Partial<OverlaySettings>): OverlaySettings {
     overlaySettings = {
       opacity: patch.opacity ?? overlaySettings.opacity,
       locked: patch.locked ?? overlaySettings.locked,
-      clickThrough: patch.clickThrough ?? overlaySettings.clickThrough
+      clickThrough: patch.clickThrough ?? overlaySettings.clickThrough,
+      compact: patch.compact ?? overlaySettings.compact
     }
   }
   applyOverlaySettings()
   return { ...overlaySettings }
+}
+
+// Compact mode is allowed to sit shorter than the full-mode floor.
+function currentMinHeight(): number {
+  return overlaySettings.compact ? OVERLAY_COMPACT_MIN_HEIGHT : OVERLAY_MIN_HEIGHT
 }
 
 function broadcastOverlaySettings(): void {
@@ -83,13 +104,46 @@ function pollInteractiveRegion(): void {
   if (!overlaySettings.clickThrough || !overlayWindow || overlayWindow.isDestroyed()) return
   const bounds = overlayWindow.getBounds()
   const cursor = screen.getCursorScreenPoint()
-  const inX = cursor.x >= bounds.x && cursor.x < bounds.x + bounds.width
-  const inTitle = inX && cursor.y >= bounds.y && cursor.y < bounds.y + TITLE_INTERACTIVE_HEIGHT
-  const inFooter =
-    inX &&
-    cursor.y >= bounds.y + bounds.height - FOOTER_INTERACTIVE_HEIGHT &&
-    cursor.y < bounds.y + bounds.height
-  updatePointerPassthrough(!(inTitle || inFooter))
+  const relX = cursor.x - bounds.x
+  const relY = cursor.y - bounds.y
+  const inX = relX >= 0 && relX < bounds.width
+  let interactive: boolean
+  if (interactiveRects.length) {
+    // Renderer reported the live interactive region(s) (the top-right button
+    // group). Only those capture the cursor; the rest of the overlay passes
+    // through so the combat info / footer hint can't be clicked by accident.
+    interactive =
+      inX &&
+      relY >= 0 &&
+      relY < bounds.height &&
+      interactiveRects.some(
+        (rect) =>
+          relX >= rect.x &&
+          relX < rect.x + rect.width &&
+          relY >= rect.y &&
+          relY < rect.y + rect.height
+      )
+  } else {
+    // Fallback before the renderer reports (keeps the controls reachable).
+    const inTitle = inX && relY >= 0 && relY < TITLE_INTERACTIVE_HEIGHT
+    const inFooter =
+      inX && relY >= bounds.height - FOOTER_INTERACTIVE_HEIGHT && relY < bounds.height
+    interactive = inTitle || inFooter
+  }
+  updatePointerPassthrough(!interactive)
+}
+
+export function setOverlayInteractiveRects(rects: InteractiveRect[]): void {
+  interactiveRects = Array.isArray(rects)
+    ? rects.filter(
+        (rect) =>
+          rect &&
+          Number.isFinite(rect.x) &&
+          Number.isFinite(rect.y) &&
+          rect.width > 0 &&
+          rect.height > 0
+      )
+    : []
 }
 
 function startPointerPassthroughPolling(): void {
@@ -121,7 +175,7 @@ function applyOverlaySettings(): void {
     overlayWindow.setMaximumSize(lockedBounds.width, lockedBounds.height)
   } else {
     lockedBounds = null
-    overlayWindow.setMinimumSize(OVERLAY_MIN_WIDTH, OVERLAY_MIN_HEIGHT)
+    overlayWindow.setMinimumSize(OVERLAY_MIN_WIDTH, currentMinHeight())
     overlayWindow.setMaximumSize(100000, OVERLAY_MAX_HEIGHT)
   }
 
@@ -157,6 +211,47 @@ export function setOverlayLocked(locked: boolean): OverlaySettings {
   return persistSettings({ locked })
 }
 
+// Resize only the width (keeps x/y/height), honoring the min-width floor and
+// temporarily relaxing the locked size pin so an explicit compact toggle works
+// even when the overlay is locked.
+function resizeOverlayWidth(targetWidth: number): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return
+  const bounds = overlayWindow.getBounds()
+  const width = Math.max(OVERLAY_MIN_WIDTH, Math.round(targetWidth))
+  if (bounds.width === width) return
+  const wasLocked = overlaySettings.locked
+  if (wasLocked) {
+    overlayWindow.setMinimumSize(OVERLAY_MIN_WIDTH, currentMinHeight())
+    overlayWindow.setMaximumSize(100000, OVERLAY_MAX_HEIGHT)
+  }
+  overlayWindow.setBounds({ x: bounds.x, y: bounds.y, width, height: bounds.height })
+  if (wasLocked) {
+    const pinned = overlayWindow.getBounds()
+    lockedBounds = pinned
+    overlayWindow.setMinimumSize(pinned.width, pinned.height)
+    overlayWindow.setMaximumSize(pinned.width, pinned.height)
+  }
+}
+
+export function setOverlayCompact(compact: boolean): OverlaySettings {
+  const alreadyCompact = overlaySettings.compact
+  if (compact && !alreadyCompact && overlayWindow && !overlayWindow.isDestroyed()) {
+    savedFullWidth = overlayWindow.getBounds().width
+  }
+  const next = persistSettings({ compact })
+  if (compact) {
+    resizeOverlayWidth(OVERLAY_COMPACT_WIDTH)
+  } else {
+    resizeOverlayWidth(savedFullWidth ?? OVERLAY_DEFAULT_WIDTH)
+    savedFullWidth = null
+  }
+  return next
+}
+
+export function toggleOverlayCompact(): OverlaySettings {
+  return setOverlayCompact(!overlaySettings.compact)
+}
+
 export function setOverlayOpacity(opacity: number): OverlaySettings {
   return persistSettings({ opacity })
 }
@@ -170,7 +265,7 @@ export function resizeOverlayToHeight(targetHeight: number): void {
   if (overlaySettings.locked) return
   const bounds = overlayWindow.getBounds()
   const height = Math.max(
-    OVERLAY_MIN_HEIGHT,
+    currentMinHeight(),
     Math.min(OVERLAY_MAX_HEIGHT, Math.round(targetHeight))
   )
   if (bounds.height === height) return
@@ -184,13 +279,14 @@ export function resizeOverlayToHeight(targetHeight: number): void {
 
 export function createOverlayWindow(): BrowserWindow {
   const { width } = screen.getPrimaryDisplay().workAreaSize
+  const initialWidth = overlaySettings.compact ? OVERLAY_COMPACT_WIDTH : OVERLAY_DEFAULT_WIDTH
   const win = new BrowserWindow({
-    width: 560,
+    width: initialWidth,
     height: OVERLAY_DEFAULT_HEIGHT,
     x: Math.max(24, width - 600),
     y: 96,
-    minWidth: 360,
-    minHeight: 160,
+    minWidth: OVERLAY_MIN_WIDTH,
+    minHeight: overlaySettings.compact ? OVERLAY_COMPACT_MIN_HEIGHT : OVERLAY_MIN_HEIGHT,
     maxHeight: OVERLAY_MAX_HEIGHT,
     frame: false,
     transparent: true,
@@ -232,6 +328,7 @@ export function closeOverlayWindow(): void {
   const win = overlayWindow
   if (!win || win.isDestroyed()) return
   stopPointerPassthroughPolling()
+  interactiveRects = []
   win.setIgnoreMouseEvents(false)
   win.close()
 }

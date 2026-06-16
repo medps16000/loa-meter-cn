@@ -103,11 +103,6 @@ export type ClassIdLookup = {
   byPlayerName: Map<string, number>
 }
 
-function rawRows(value: unknown): Array<Record<string, unknown>> {
-  if (!Array.isArray(value)) return []
-  return value.filter((row) => row && typeof row === 'object') as Array<Record<string, unknown>>
-}
-
 function rowClassId(row: Record<string, unknown>): number | null {
   const classId = coerceInt(
     row.skillClassId,
@@ -152,23 +147,30 @@ function pickDominantClass(counts: Map<number, number> | undefined): number | nu
 export function buildClassIdLookup(payload: Record<string, unknown>): ClassIdLookup {
   const bySource = new Map<string, Map<number, number>>()
   const byName = new Map<string, Map<number, number>>()
-  const sources = [
-    ...rawRows(payload.displaySourceSkillRows),
-    ...rawRows(payload.displaySkillTotals),
-    ...rawRows(payload.skillTotals),
-    ...rawRows(payload.sourceSkillRows),
-    ...rawRows(payload.selfSkillTotals),
-    ...rawRows(payload.selfSourceSkillRows)
+  // Runs on every combat tick: iterate each source array in place rather than
+  // spreading them into two throwaway arrays (filter + concat) per call.
+  const sourceArrays = [
+    payload.displaySourceSkillRows,
+    payload.displaySkillTotals,
+    payload.skillTotals,
+    payload.sourceSkillRows,
+    payload.selfSkillTotals,
+    payload.selfSourceSkillRows
   ]
 
-  for (const row of sources) {
-    const classId = rowClassId(row)
-    if (!classId) continue
-    const weight = Math.max(1, coerceInt(row.totalDamage, coerceInt(row.damage)))
-    const sourceId = String(row.sourceId ?? '').trim()
-    const label = rowLabel(row)
-    addWeightedClass(bySource, sourceId, classId, weight)
-    addWeightedClass(byName, label, classId, weight)
+  for (const source of sourceArrays) {
+    if (!Array.isArray(source)) continue
+    for (const raw of source) {
+      if (!raw || typeof raw !== 'object') continue
+      const row = raw as Record<string, unknown>
+      const classId = rowClassId(row)
+      if (!classId) continue
+      const weight = Math.max(1, coerceInt(row.totalDamage, coerceInt(row.damage)))
+      const sourceId = String(row.sourceId ?? '').trim()
+      const label = rowLabel(row)
+      addWeightedClass(bySource, sourceId, classId, weight)
+      addWeightedClass(byName, label, classId, weight)
+    }
   }
 
   const bySourceId = new Map<string, number>()

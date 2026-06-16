@@ -1,9 +1,10 @@
 {
   "name": "loa-meter-cn-electron",
-  "version": "0.1.1",
-  "description": "LOA METER CN Electron UI",
+  "version": "1.0.0",
+  "description": "LOA METER CN - Electron + Vue combat meter UI",
   "private": true,
   "type": "module",
+  "author": "LOA METER CN",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
@@ -32,17 +33,20 @@
   "engines": {
     "node": ">=18"
   },
-  "build": {
+    "build": {
     "appId": "cn.loa-meter.meter",
     "productName": "LOA METER CN",
+    "copyright": "Copyright (c) 2026 LOA METER CN",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release"
     },
-    "electronDist": "node_modules/electron/dist",
     "files": [
       "out/**",
       "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**"
     ],
     "asar": true,
     "win": {

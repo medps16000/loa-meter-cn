@@ -28,6 +28,10 @@ function metricsFromDocument(document: Record<string, unknown>) {
 
   return {
     bossName: String(display.bossName ?? summary.bossName ?? '全部目标'),
+    bossDifficulty:
+      String(display.bossDifficulty ?? summary.bossDifficulty ?? '').trim() || null,
+    raidName: String(display.bossRaidName ?? summary.bossRaidName ?? '').trim() || null,
+    gateName: String(display.bossGateName ?? summary.bossGateName ?? '').trim() || null,
     totalDamage: Number(display.totalDamage ?? state.totalDamage ?? 0),
     dps: Number(display.dps ?? state.dps ?? 0),
     hitCount: Number(display.hitCount ?? state.hitCount ?? 0),

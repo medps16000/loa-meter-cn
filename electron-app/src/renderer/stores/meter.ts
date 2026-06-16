@@ -6,6 +6,9 @@ type EncounterSummary = {
   id: number
   startedAt: string
   bossName: string
+  raidName: string | null
+  gateName: string | null
+  bossDifficulty: string | null
   totalDamage: number
   dps: number
   durationSeconds: number

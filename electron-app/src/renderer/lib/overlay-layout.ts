@@ -1,10 +1,13 @@
 export const OVERLAY_ROW_HEIGHT = 30
-export const OVERLAY_CHROME_HEIGHT = 200
+// Includes the optional raid-name line in the titlebar.
+export const OVERLAY_CHROME_HEIGHT = 214
 export const OVERLAY_SKILL_CONTEXT_HEIGHT = 30
 export const OVERLAY_ROWS_PADDING = 12
 export const OVERLAY_HEIGHT_BUFFER = 8
 export const OVERLAY_DEFAULT_PARTY_ROWS = 8
 export const OVERLAY_MIN_HEIGHT = 160
+// Thumbnail/compact mode drops the tabs + footer, so it can sit much shorter.
+export const OVERLAY_COMPACT_MIN_HEIGHT = 72
 export const OVERLAY_MAX_HEIGHT = 560
 export const OVERLAY_MAX_AUTO_ROWS = 12
 export const OVERLAY_ROW_LIMIT = 12
@@ -32,7 +35,8 @@ export function measureOverlayContentHeight(root: HTMLElement | null): number | 
     root.querySelector('.titlebar'),
     root.querySelector('.tabs'),
     root.querySelector('.skill-context'),
-    root.querySelector('.grid-head'),
+    root.querySelector('.shield-subtabs'),
+    root.querySelector(':scope > .grid-head'),
     root.querySelector('.rows'),
     root.querySelector('.footer')
   ]

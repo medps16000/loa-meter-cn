@@ -154,13 +154,13 @@ function cellClass(share: number | null): string {
 const hintText = computed(() => {
   switch (mode.value) {
     case 'support':
-      return '有效率 = 该辅助施放的队伍增益所覆盖伤害 / 同小队总伤害（对齐 LOA Logs 支援贡献口径）。'
+      return '有效率 = 增益持续期间小队对 BOSS(含盾)造成的伤害 / 小队对 BOSS(含盾)总伤害（与 DPS 同口径，仅统计 BOSS 伤害与 BOSS 盾伤）。'
     case 'debuff':
-      return '有效率 = 该玩家施放的 BOSS 减益所覆盖伤害 / 同小队总伤害（其他队员命中也计入）。'
+      return '有效率 = 减益持续期间对 BOSS(含盾)造成的伤害 / 小队对 BOSS(含盾)总伤害（与 DPS 同口径，仅统计 BOSS 伤害与 BOSS 盾伤）。'
     case 'coverage':
-      return '覆盖率 = 该输出自身命中中，处于队伍增益状态下的伤害占比。'
+      return '覆盖率 = 该输出对 BOSS(含盾)伤害中，处于队伍增益状态下的占比（仅统计 BOSS 伤害与 BOSS 盾伤）。'
     default:
-      return '百分比 = 该输出自身命中中，处于自身增益状态下的伤害占比。'
+      return '百分比 = 该输出对 BOSS(含盾)伤害中，处于自身增益状态下的占比（仅统计 BOSS 伤害与 BOSS 盾伤）。'
   }
 })
 </script>

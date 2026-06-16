@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import ClassIcon from './ClassIcon.vue'
 import type { DisplayRow } from '../lib/meter-display'
 import { formatDamage, formatPercent } from '../lib/format'
 
-defineProps<{
+const props = defineProps<{
   rows: DisplayRow[]
   selectedSourceId?: string
 }>()
@@ -11,6 +12,12 @@ defineProps<{
 const emit = defineEmits<{
   select: [sourceId: string]
 }>()
+
+// 仅在出现 Boss 盾伤时显示盾伤列, 避免普通战斗多一列空数据.
+const showShield = computed(() => props.rows.some((row) => row.shieldDamage > 0))
+// 瘫痪值 (record+0x3c) 同理: 有数据时才显示, 避免空列.
+const showStagger = computed(() => props.rows.some((row) => row.stagger > 0))
+const columnCount = computed(() => 5 + (showShield.value ? 1 : 0) + (showStagger.value ? 1 : 0))
 </script>
 
 <template>
@@ -19,6 +26,8 @@ const emit = defineEmits<{
       <tr>
         <th>玩家</th>
         <th>伤害</th>
+        <th v-if="showShield" title="对 Boss 护盾造成的伤害（已计入伤害）">盾伤</th>
+        <th v-if="showStagger" title="对 Boss 造成的瘫痪值（record+0x3c）">瘫痪</th>
         <th>占比</th>
         <th>DPS</th>
         <th>暴击</th>
@@ -44,12 +53,14 @@ const emit = defineEmits<{
           </span>
         </td>
         <td>{{ formatDamage(row.totalDamage) }}</td>
+        <td v-if="showShield" class="shield-cell">{{ row.shieldDamage > 0 ? formatDamage(row.shieldDamage) : '–' }}</td>
+        <td v-if="showStagger" class="stagger-cell">{{ row.stagger > 0 ? formatDamage(row.stagger) : '–' }}</td>
         <td>{{ formatPercent(row.damageShare) }}</td>
         <td>{{ formatDamage(row.dps) }}</td>
         <td>{{ formatPercent(row.critRate) }}</td>
       </tr>
       <tr v-if="!rows.length">
-        <td colspan="5" class="muted">等待伤害数据…</td>
+        <td :colspan="columnCount" class="muted">等待伤害数据…</td>
       </tr>
     </tbody>
   </table>
@@ -83,5 +94,13 @@ td .muted {
   font-size: 11px;
   color: #8b93a7;
   line-height: 1.2;
+}
+
+.shield-cell {
+  color: #7dd3fc;
+}
+
+.stagger-cell {
+  color: #f0b860;
 }
 </style>

@@ -20,6 +20,7 @@ const props = defineProps<{
         <tr>
           <th>技能</th>
           <th>伤害</th>
+          <th title="该技能对 Boss 造成的瘫痪值（record+0x3c）">瘫痪</th>
           <th>占比</th>
           <th>DPS</th>
           <th>暴击</th>
@@ -33,6 +34,7 @@ const props = defineProps<{
         <tr v-for="skill in props.row.skillBreakdown" :key="`${skill.skillId}-${skill.name}`">
           <td>{{ skill.name }}</td>
           <td>{{ formatDamage(skill.totalDamage) }}</td>
+          <td class="stagger-cell">{{ skill.stagger > 0 ? formatDamage(skill.stagger) : '–' }}</td>
           <td>{{ formatPercent(skill.damageShare) }}</td>
           <td>{{ formatDamage(skill.dps) }}</td>
           <td>{{ formatPercent(skill.critRate) }}</td>
@@ -61,5 +63,9 @@ header h3 {
 
 header p {
   margin: 4px 0 0;
+}
+
+.stagger-cell {
+  color: #f0b860;
 }
 </style>

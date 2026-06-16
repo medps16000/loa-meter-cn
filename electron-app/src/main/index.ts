@@ -11,12 +11,9 @@ import {
   setOverlayClickThrough,
   isOverlayClickThrough
 } from './overlay-window'
+import { getProjectionPayload } from './services/encounter-projection'
 import { MeterClient, type MeterState } from './services/meter-client'
-import {
-  configurePackagedMeterEnvironment,
-  forgetPackagedBackendProcess,
-  startPackagedBackend
-} from './backend-runtime'
+import { startBackend, stopBackend } from './backend'
 
 function defaultDbPath(): string {
   const base =
@@ -38,15 +35,38 @@ let mainWindow: BrowserWindow | null = null
 let encounterDb: EncounterDb | null = null
 let meterClient: MeterClient | null = null
 let removeMeterListener: (() => void) | null = null
-let quitAfterCleanup = false
 
 function broadcastMeterState(state: MeterState): void {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('meter:state', state)
-  }
+  // The main window is a query-only tool and no longer renders live combat, so
+  // we deliberately do NOT forward the (large) per-tick state to it. Only the
+  // overlay consumes live updates, which keeps the main UI cheap.
   const overlay = getOverlayWindow()
   if (overlay && !overlay.isDestroyed()) {
-    overlay.webContents.send('meter:state', state)
+    // While a stored encounter is projected, the overlay is pinned to it and
+    // live updates are suppressed.
+    const projected = getProjectionPayload()
+    overlay.webContents.send('meter:state', projected ?? state)
+  }
+}
+
+function pushStateToOverlay(): void {
+  let overlay = getOverlayWindow()
+  if (!overlay || overlay.isDestroyed()) {
+    if (!shouldShowOverlayWindow()) return
+    overlay = createOverlayWindow()
+  }
+  const payload = getProjectionPayload() ?? meterClient?.latestState ?? null
+  if (!payload) return
+  const send = (): void => {
+    const win = getOverlayWindow()
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('meter:state', payload)
+    }
+  }
+  if (overlay.webContents.isLoading()) {
+    overlay.webContents.once('did-finish-load', send)
+  } else {
+    send()
   }
 }
 
@@ -81,32 +101,15 @@ function registerGlobalShortcuts(): void {
   })
 }
 
-async function cleanupRuntime(sendShutdown: boolean): Promise<void> {
-  globalShortcut.unregisterAll()
-  closeOverlayWindow()
-  removeMeterListener?.()
-  removeMeterListener = null
-
-  const client = meterClient
-  meterClient = null
-  client?.stop()
-  if (sendShutdown && client && !client.isOffline) {
-    await client.shutdown().catch(() => undefined)
-  }
-
-  encounterDb?.close()
-  encounterDb = null
-  forgetPackagedBackendProcess()
-}
-
 app.whenReady().then(() => {
-  configurePackagedMeterEnvironment()
-  startPackagedBackend()
-
+  // Start the bundled capture backend first (packaged Windows only); it serves
+  // live combat state on 127.0.0.1:8765 that the meter client below consumes.
+  // The client's reconnect loop tolerates the backend still coming up.
+  startBackend()
   encounterDb = new EncounterDb(process.env.METER_DB_PATH ?? defaultDbPath())
   bindOverlayDatabase(encounterDb)
   meterClient = new MeterClient()
-  registerIpcHandlers(encounterDb, meterClient)
+  registerIpcHandlers(encounterDb, meterClient, { pushStateToOverlay })
   removeMeterListener = meterClient.onStateChange(broadcastMeterState)
   meterClient.start()
 
@@ -127,19 +130,29 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  globalShortcut.unregisterAll()
+  removeMeterListener?.()
+  removeMeterListener = null
+  meterClient?.stop()
+  encounterDb?.close()
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
 
-app.on('before-quit', (event) => {
-  if (quitAfterCleanup) return
-  event.preventDefault()
-  quitAfterCleanup = true
-  void cleanupRuntime(app.isPackaged).finally(() => app.quit())
-})
-
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   closeOverlayWindow()
+})
+
+// Ask the bundled backend (meter server + workers) to stop before we exit so it
+// does not keep intercepting game packets after the UI closes.
+let backendStopped = false
+app.on('before-quit', (event) => {
+  if (backendStopped) return
+  event.preventDefault()
+  void stopBackend().finally(() => {
+    backendStopped = true
+    app.quit()
+  })
 })

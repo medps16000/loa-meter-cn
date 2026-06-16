@@ -7,16 +7,21 @@ const DEFAULT_ENCOUNTER = join(
   '..',
   '..',
   'offline',
-  'samples',
-  'sample_encounter.json'
+  'runs',
+  '20260607_195723',
+  'encounters',
+  'encounter_20260607_200939',
+  'encounter_20260607_200939.json'
 )
 
 const DEFAULT_STATIC_STATE = join(
   '..',
   '..',
   'offline',
-  'samples',
-  'sample_live_meter_state.json'
+  'runs',
+  '20260607_195723',
+  'captures',
+  'truth_allop_wire_20260607_195723_live_meter_state.json'
 )
 
 export type OfflineReplayInfo = {

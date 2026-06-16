@@ -6,6 +6,7 @@ export type SkillBreakdownRow = {
   name: string
   dps: number
   totalDamage: number
+  stagger: number
   hitCount: number
   critRate: number
   sourceDamageShare: number
@@ -24,6 +25,8 @@ export type DisplayRow = {
   name: string
   dps: number
   totalDamage: number
+  shieldDamage: number
+  stagger: number
   critRate: number
   damageShare: number
   sourceId: string
@@ -61,6 +64,8 @@ export type BuffSourceStats = {
   buffedBy: Record<string, number>
   buffedBySelf: Record<string, number>
   debuffedBy: Record<string, number>
+  /** Debuff damage split by applier: effectId -> casterSourceId -> damage. */
+  debuffedByCaster: Record<string, Record<string, number>>
 }
 
 export type BuffCasterStats = {
@@ -69,6 +74,7 @@ export type BuffCasterStats = {
   classId: number | null
   isSupport: boolean
   partyInstanceId: number | null
+  partyGroupIndex: number | null
   partyBuffTotalDamage: number
   partyDebuffTotalDamage: number
   partyBuffedBy: Record<string, number>
@@ -77,8 +83,14 @@ export type BuffCasterStats = {
 
 export type BuffPartyStats = {
   partyInstanceId: number
+  partyGroupIndex: number | null
   totalDamage: number
   memberSourceIds: string[]
+}
+
+export type DefenseBreakApply = {
+  sourceId: string
+  count: number
 }
 
 export type BuffStatsView = {
@@ -88,6 +100,7 @@ export type BuffStatsView = {
   bySource: Map<string, BuffSourceStats>
   byCaster: BuffCasterStats[]
   parties: BuffPartyStats[]
+  defenseBreakApplies: DefenseBreakApply[]
   raidTotalDamage: number
 }
 
@@ -95,10 +108,36 @@ export type ShieldSourceStats = {
   sourceId: string
   playerName?: string
   classId?: number | null
+  partyInstanceId: number | null
+  partyGroupIndex: number | null
   shieldGiven: number
   shieldReceived: number
   effectiveShieldGiven: number
   effectiveShieldReceived: number
+  shieldGivenBy: Record<string, number>
+  shieldReceivedBy: Record<string, number>
+  effectiveShieldGivenBy: Record<string, number>
+  effectiveShieldReceivedBy: Record<string, number>
+}
+
+export type ShieldCatalogEntry = {
+  buffId: string
+  name: string
+  icon: string
+  buffType: string
+  uniqueGroup: number
+}
+
+export type ShieldPartyInfo = {
+  partyInstanceId: number
+  partyGroupIndex: number | null
+  memberSourceIds: string[]
+}
+
+export type ShieldStatsView = {
+  catalog: Map<string, ShieldCatalogEntry>
+  parties: ShieldPartyInfo[]
+  rows: ShieldSourceStats[]
 }
 
 function toRecordOfInt(value: unknown): Record<string, number> {
@@ -107,6 +146,16 @@ function toRecordOfInt(value: unknown): Record<string, number> {
   for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
     const amount = coerceInt(raw)
     if (amount > 0) result[key] = amount
+  }
+  return result
+}
+
+function toNestedRecordOfInt(value: unknown): Record<string, Record<string, number>> {
+  const result: Record<string, Record<string, number>> = {}
+  if (!value || typeof value !== 'object') return result
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const inner = toRecordOfInt(raw)
+    if (Object.keys(inner).length) result[key] = inner
   }
   return result
 }
@@ -159,7 +208,8 @@ export function parseBuffStats(payload: Record<string, unknown>): BuffStatsView 
         sourceId,
         buffedBy: toRecordOfInt(item.buffedBy),
         buffedBySelf: toRecordOfInt(item.buffedBySelf),
-        debuffedBy: toRecordOfInt(item.debuffedBy)
+        debuffedBy: toRecordOfInt(item.debuffedBy),
+        debuffedByCaster: toNestedRecordOfInt(item.debuffedByCaster)
       })
     }
   }
@@ -183,6 +233,7 @@ export function parseBuffStats(payload: Record<string, unknown>): BuffStatsView 
         classId: coerceInt(item.classId) || null,
         isSupport: Boolean(item.isSupport),
         partyInstanceId: coerceInt(item.partyInstanceId) || null,
+        partyGroupIndex: item.partyGroupIndex == null ? null : coerceInt(item.partyGroupIndex),
         partyBuffTotalDamage: coerceInt(item.partyBuffTotalDamage ?? item.partyTotalDamage),
         partyDebuffTotalDamage: coerceInt(item.partyDebuffTotalDamage ?? item.partyTotalDamage),
         partyBuffedBy: toRecordOfInt(item.partyBuffedBy),
@@ -201,11 +252,25 @@ export function parseBuffStats(payload: Record<string, unknown>): BuffStatsView 
       if (!partyInstanceId) continue
       parties.push({
         partyInstanceId,
+        partyGroupIndex: item.partyGroupIndex == null ? null : coerceInt(item.partyGroupIndex),
         totalDamage: coerceInt(item.totalDamage),
         memberSourceIds: Array.isArray(item.memberSourceIds)
           ? item.memberSourceIds.map((id) => String(id))
           : []
       })
+    }
+  }
+
+  const defenseBreakApplies: DefenseBreakApply[] = []
+  const rawDefenseBreak = stats.defenseBreakApplies
+  if (Array.isArray(rawDefenseBreak)) {
+    for (const entry of rawDefenseBreak) {
+      if (!entry || typeof entry !== 'object') continue
+      const item = entry as Record<string, unknown>
+      const sourceId = String(item.sourceId ?? '').trim()
+      const count = coerceInt(item.count)
+      if (!sourceId || count <= 0) continue
+      defenseBreakApplies.push({ sourceId, count })
     }
   }
 
@@ -217,32 +282,81 @@ export function parseBuffStats(payload: Record<string, unknown>): BuffStatsView 
     bySource,
     byCaster,
     parties,
+    defenseBreakApplies,
     raidTotalDamage: coerceInt(stats.raidTotalDamage)
   }
 }
 
 export function parseShieldStats(payload: Record<string, unknown>): ShieldSourceStats[] {
+  return parseShieldStatsView(payload)?.rows ?? []
+}
+
+export function parseShieldStatsView(payload: Record<string, unknown>): ShieldStatsView | null {
   const raw = payload.shieldStats
-  if (!raw || typeof raw !== 'object') return []
-  const rows = (raw as Record<string, unknown>).bySource
-  if (!Array.isArray(rows)) return []
-  const result: ShieldSourceStats[] = []
-  for (const entry of rows) {
-    if (!entry || typeof entry !== 'object') continue
-    const item = entry as Record<string, unknown>
-    const sourceId = String(item.sourceId ?? '').trim()
-    if (!sourceId) continue
-    result.push({
-      sourceId,
-      playerName: String(item.playerName ?? '').trim() || undefined,
-      classId: item.classId == null ? null : coerceInt(item.classId) || null,
-      shieldGiven: coerceInt(item.shieldGiven),
-      shieldReceived: coerceInt(item.shieldReceived),
-      effectiveShieldGiven: coerceInt(item.effectiveShieldGiven),
-      effectiveShieldReceived: coerceInt(item.effectiveShieldReceived)
-    })
+  if (!raw || typeof raw !== 'object') return null
+  const stats = raw as Record<string, unknown>
+
+  const catalog = new Map<string, ShieldCatalogEntry>()
+  const rawCatalog = stats.shieldCatalog
+  if (rawCatalog && typeof rawCatalog === 'object') {
+    for (const [buffId, entry] of Object.entries(rawCatalog as Record<string, unknown>)) {
+      if (!entry || typeof entry !== 'object') continue
+      const item = entry as Record<string, unknown>
+      catalog.set(buffId, {
+        buffId,
+        name: String(item.name ?? '').trim(),
+        icon: String(item.icon ?? '').trim(),
+        buffType: String(item.buffType ?? '').trim(),
+        uniqueGroup: coerceInt(item.uniqueGroup)
+      })
+    }
   }
-  return result
+
+  const parties: ShieldPartyInfo[] = []
+  const rawParties = stats.parties
+  if (Array.isArray(rawParties)) {
+    for (const entry of rawParties) {
+      if (!entry || typeof entry !== 'object') continue
+      const item = entry as Record<string, unknown>
+      const partyInstanceId = coerceInt(item.partyInstanceId)
+      if (!partyInstanceId) continue
+      parties.push({
+        partyInstanceId,
+        partyGroupIndex: item.partyGroupIndex == null ? null : coerceInt(item.partyGroupIndex),
+        memberSourceIds: Array.isArray(item.memberSourceIds)
+          ? item.memberSourceIds.map((id) => String(id))
+          : []
+      })
+    }
+  }
+
+  const rows: ShieldSourceStats[] = []
+  const rawRows = stats.bySource
+  if (Array.isArray(rawRows)) {
+    for (const entry of rawRows) {
+      if (!entry || typeof entry !== 'object') continue
+      const item = entry as Record<string, unknown>
+      const sourceId = String(item.sourceId ?? '').trim()
+      if (!sourceId) continue
+      rows.push({
+        sourceId,
+        playerName: String(item.playerName ?? '').trim() || undefined,
+        classId: item.classId == null ? null : coerceInt(item.classId) || null,
+        partyInstanceId: item.partyInstanceId == null ? null : coerceInt(item.partyInstanceId),
+        partyGroupIndex: item.partyGroupIndex == null ? null : coerceInt(item.partyGroupIndex),
+        shieldGiven: coerceInt(item.shieldGiven),
+        shieldReceived: coerceInt(item.shieldReceived),
+        effectiveShieldGiven: coerceInt(item.effectiveShieldGiven),
+        effectiveShieldReceived: coerceInt(item.effectiveShieldReceived),
+        shieldGivenBy: toRecordOfInt(item.shieldGivenBy),
+        shieldReceivedBy: toRecordOfInt(item.shieldReceivedBy),
+        effectiveShieldGivenBy: toRecordOfInt(item.effectiveShieldGivenBy),
+        effectiveShieldReceivedBy: toRecordOfInt(item.effectiveShieldReceivedBy)
+      })
+    }
+  }
+  if (!rows.length) return null
+  return { catalog, parties, rows }
 }
 
 export type DisplayState = {
@@ -250,6 +364,7 @@ export type DisplayState = {
   encounterId: number
   durationSeconds: number
   totalDamage: number
+  shieldDamage: number
   dps: number
   hitCount: number
   critRate: number
@@ -258,6 +373,7 @@ export type DisplayState = {
   bossKnown: boolean
   bossName: string
   bossGateName: string | null
+  bossRaidName: string | null
   bossDifficulty: string | null
   bossTargetIds: unknown[]
   warning: string | null
@@ -359,6 +475,7 @@ export function parseSkillBreakdownRows(
       name: skillLabel(row),
       dps: coerceFloat(row.dps),
       totalDamage: damage,
+      stagger: coerceInt(row.stagger),
       hitCount: coerceInt(row.hitCount),
       critRate: coerceFloat(row.critRate),
       sourceDamageShare: sourceTotalDamage > 0 ? damage / sourceTotalDamage : 0,
@@ -402,24 +519,28 @@ export function parseMeterPayload(
 
   let rawRows: unknown[] = []
   let totalDamage = 0
+  let shieldDamage = 0
   let dps = 0
   let hitCount = 0
   let critRate = 0
   let bossKnown = false
   let bossName = ''
   let bossGateName: string | null = null
+  let bossRaidName: string | null = null
   let bossDifficulty: string | null = null
   let warning: string | null = null
 
   if (bossOnly) {
     rawRows = Array.isArray(payload.uiRows) ? payload.uiRows : []
     totalDamage = coerceInt(summary.totalDamage, coerceInt(displayContract.totalDamage))
+    shieldDamage = coerceInt(summary.shieldDamage, coerceInt(displayContract.shieldDamage))
     dps = coerceFloat(summary.dps, coerceFloat(displayContract.dps))
     hitCount = coerceInt(summary.hitCount, coerceInt(displayContract.hitCount))
     critRate = coerceFloat(summary.critRate)
     bossKnown = coerceBool(summary.bossKnown, coerceBool(displayContract.bossKnown))
     bossName = String(summary.bossName ?? displayContract.bossName ?? '').trim()
     bossGateName = String(summary.bossGateName ?? displayContract.bossGateName ?? '').trim() || null
+    bossRaidName = String(summary.bossRaidName ?? displayContract.bossRaidName ?? '').trim() || null
     bossDifficulty = String(summary.bossDifficulty ?? displayContract.bossDifficulty ?? '').trim() || null
     warning =
       String(summary.warning ?? payload.damageWarning ?? '')
@@ -434,6 +555,7 @@ export function parseMeterPayload(
       if (candidateName && !bossName) bossName = candidateName
       rawRows = Array.isArray(payload.sourceTotals) ? payload.sourceTotals : []
       totalDamage = coerceInt(allSummary.totalDamage, coerceInt(payload.totalDamage))
+      shieldDamage = coerceInt(allSummary.shieldDamage, coerceInt(payload.shieldDamage))
       dps = coerceFloat(allSummary.dps, coerceFloat(payload.dps))
       hitCount = coerceInt(allSummary.hitCount, coerceInt(payload.hitCount))
       critRate = coerceFloat(allSummary.critRate, coerceFloat(payload.critRate))
@@ -445,6 +567,7 @@ export function parseMeterPayload(
   } else {
     rawRows = Array.isArray(payload.sourceTotals) ? payload.sourceTotals : []
     totalDamage = coerceInt(payload.totalDamage, coerceInt(displayContract.totalDamage))
+    shieldDamage = coerceInt(payload.shieldDamage, coerceInt(displayContract.shieldDamage))
     dps = coerceFloat(payload.dps, coerceFloat(displayContract.dps))
     hitCount = coerceInt(payload.hitCount, coerceInt(displayContract.hitCount))
     critRate = coerceFloat(payload.critRate)
@@ -482,6 +605,8 @@ export function parseMeterPayload(
       name: sourceLabel(row),
       dps: coerceFloat(row.dps),
       totalDamage: damage,
+      shieldDamage: coerceInt(row.shieldDamage),
+      stagger: coerceInt(row.stagger),
       critRate: coerceFloat(row.critRate),
       damageShare: coerceFloat(row.damageShare),
       sourceId,
@@ -541,6 +666,7 @@ export function parseMeterPayload(
     encounterId: coerceInt(payload.encounterId, 1),
     durationSeconds,
     totalDamage,
+    shieldDamage,
     dps,
     hitCount,
     critRate,
@@ -549,6 +675,7 @@ export function parseMeterPayload(
     bossKnown,
     bossName,
     bossGateName,
+    bossRaidName,
     bossDifficulty,
     bossTargetIds: Array.isArray(summary.bossTargetIds) ? summary.bossTargetIds : [],
     warning,
@@ -601,4 +728,12 @@ export function bossTitleText(display: DisplayState): string {
   if (display.bossKnown && display.bossName) return display.bossName
   if (display.bossName) return `${display.bossName}（未确认）`
   return 'Boss 未识别'
+}
+
+/** 副本名称 + 关卡, e.g. "终幕：终结之日 第一关". */
+export function raidTitleText(display: DisplayState): string | null {
+  if (!display.bossRaidName) return null
+  return display.bossGateName
+    ? `${display.bossRaidName} ${display.bossGateName}`
+    : display.bossRaidName
 }

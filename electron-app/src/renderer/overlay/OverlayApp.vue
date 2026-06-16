@@ -9,19 +9,24 @@ import { formatDamage, formatDuration, formatPercent } from '../lib/format'
 import {
   compactDamageWarning,
   emptyTabMessage,
+  OVERLAY_SHIELD_TABS,
   OVERLAY_TABS,
   overlayPaletteColor,
-  parseOverlayBuffTable,
-  parseOverlayShieldRows,
+  parseOverlayDefenseBreakCounts,
+  parseOverlayPartyBuffTable,
+  parseOverlayPartyDebuffTable,
+  parseOverlayShieldTable,
   parseOverlayState,
   parsePlayerSkillRows,
   resolveOverlayStatusIndicator,
   rowsForTab,
   type OverlayMeterState,
   type OverlayTab,
+  type ShieldTabId,
   type SourceRow
 } from '../lib/overlay-meter'
 import {
+  OVERLAY_COMPACT_MIN_HEIGHT,
   OVERLAY_DEFAULT_PARTY_ROWS,
   OVERLAY_MAX_HEIGHT,
   OVERLAY_MIN_HEIGHT,
@@ -33,6 +38,9 @@ import {
 
 const state = ref<OverlayMeterState | null>(null)
 const rawPayload = ref<Record<string, unknown> | null>(null)
+// True while a stored encounter from SQLite is projected onto the overlay
+// (query-tool mode); live updates are suppressed by the main process.
+const projectionActive = ref(false)
 // Last payload that actually carried combat damage. Detail panels (skills /
 // buffs / shields) read from this so that an encounter clear/restart (which
 // blanks the live payload's skill rows) does not break per-player drilldown
@@ -45,8 +53,11 @@ const selectedPlayer = ref<SourceRow | null>(null)
 const settings = ref<OverlaySettings>({
   opacity: 0.92,
   locked: false,
-  clickThrough: false
+  clickThrough: false,
+  compact: false
 })
+
+const compact = computed(() => settings.value.compact)
 
 let removeStateListener: (() => void) | null = null
 let lastCombatState: OverlayMeterState | null = null
@@ -58,9 +69,28 @@ let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let overlayDragging = false
 
 const overlayRef = ref<HTMLElement | null>(null)
+const titleRightRef = ref<HTMLElement | null>(null)
 const rowsNeedScroll = ref(false)
+let reportRectsFrame: number | null = null
+let titleRightResizeObserver: ResizeObserver | null = null
 
-const detailPayload = computed(() => combatPayload.value ?? rawPayload.value)
+const detailPayload = computed(() =>
+  projectionActive.value ? rawPayload.value : (combatPayload.value ?? rawPayload.value)
+)
+
+const projectedEncounter = computed(() => {
+  const raw = rawPayload.value
+  if (!projectionActive.value || !raw) return null
+  const info = raw._projectedEncounter
+  if (!info || typeof info !== 'object') return null
+  return info as {
+    id: number
+    bossName: string
+    raidName: string | null
+    gateName: string | null
+    startedAt: string
+  }
+})
 
 const visibleRows = computed(() => {
   if (!state.value) return []
@@ -79,19 +109,53 @@ const visibleRows = computed(() => {
   return rowsForTab(state.value, activeTab.value)
 })
 
-const isPlayerTab = computed(() => activeTab.value === 'dps' || activeTab.value === 'boss' || activeTab.value === 'self')
+const isPlayerTab = computed(() => activeTab.value === 'dps')
 
-const isCustomTab = computed(() => activeTab.value === 'buffs' || activeTab.value === 'shields')
+const isCustomTab = computed(
+  () => activeTab.value === 'buffs' || activeTab.value === 'debuff' || activeTab.value === 'shields'
+)
 
 const buffTable = computed(() => {
   if (activeTab.value !== 'buffs' || !detailPayload.value || !state.value) return null
-  return parseOverlayBuffTable(detailPayload.value, state.value.rows, 4)
+  return parseOverlayPartyBuffTable(detailPayload.value, state.value.rows)
 })
 
-const shieldRows = computed(() => {
-  if (activeTab.value !== 'shields' || !detailPayload.value || !state.value) return []
-  return parseOverlayShieldRows(detailPayload.value, state.value.rows, OVERLAY_ROW_LIMIT)
+const debuffTable = computed(() => {
+  if (activeTab.value !== 'debuff' || !detailPayload.value || !state.value) return null
+  return parseOverlayPartyDebuffTable(detailPayload.value, state.value.rows)
 })
+
+const defenseBreakCounts = computed(() => {
+  if (activeTab.value !== 'debuff' || !detailPayload.value || !state.value) return null
+  return parseOverlayDefenseBreakCounts(detailPayload.value, state.value.rows)
+})
+
+function buffCellText(cell: number | null): string {
+  if (cell == null) return '–'
+  const percent = cell * 100
+  return percent >= 99.95 ? '100%' : `${percent.toFixed(1)}%`
+}
+
+const shieldTab = ref<ShieldTabId>('given')
+
+const shieldTable = computed(() => {
+  if (activeTab.value !== 'shields' || !detailPayload.value || !state.value) return null
+  return parseOverlayShieldTable(detailPayload.value, state.value.rows, shieldTab.value, 6)
+})
+
+function setShieldTab(tab: ShieldTabId): void {
+  if (settings.value.clickThrough) return
+  shieldTab.value = tab
+}
+
+function shieldRowStyle(row: { classId: number | null; share: number }): Record<string, string> {
+  const color = classBarColor(row.classId) ?? '#4f7f2f'
+  const width = `${Math.max(2, Math.round(Math.max(0, Math.min(1, row.share)) * 100))}%`
+  return {
+    '--row-color': color,
+    '--share-width': width
+  }
+}
 
 const nameColumnLabel = computed(() => (activeTab.value === 'skills' ? '技能' : '名称'))
 
@@ -118,6 +182,14 @@ const bossTitle = computed(() => {
   if (state.value.damageWarning) return compactDamageWarning(state.value)
   if (state.value.bossKnown && state.value.bossName) return state.value.bossName
   return '未识别'
+})
+
+// 副本名称 + 关卡, e.g. "终幕：终结之日 第一关"
+const raidTitle = computed(() => {
+  const raid = state.value?.bossRaidName ?? null
+  const gate = state.value?.bossGateName ?? null
+  if (!raid) return null
+  return gate ? `${raid} ${gate}` : raid
 })
 
 const statusIndicator = computed(() =>
@@ -155,6 +227,16 @@ function hasDamage(value: OverlayMeterState): boolean {
 }
 
 function applyPayload(payload: Record<string, unknown>): void {
+  if (payload._projectedEncounter && typeof payload._projectedEncounter === 'object') {
+    // Projected history is rendered as-is and must not pollute the live
+    // combat fallback (lastCombatState) used between pulls.
+    projectionActive.value = true
+    rawPayload.value = payload
+    state.value = parseOverlayState(payload, OVERLAY_ROW_LIMIT)
+    error.value = null
+    return
+  }
+  projectionActive.value = false
   rawPayload.value = payload
   const parsed = parseOverlayState(payload, OVERLAY_ROW_LIMIT)
   if (hasDamage(parsed)) {
@@ -169,6 +251,10 @@ function applyPayload(payload: Record<string, unknown>): void {
     state.value = parsed
   }
   error.value = null
+}
+
+async function exitProjection(): Promise<void> {
+  await window.overlayApi.clearProjection()
 }
 
 async function refresh(): Promise<void> {
@@ -220,6 +306,15 @@ async function toggleLocked(): Promise<void> {
   settings.value = await window.overlayApi.toggleLocked()
 }
 
+async function toggleCompact(): Promise<void> {
+  settings.value = await window.overlayApi.toggleCompact()
+}
+
+async function expandFromCompact(): Promise<void> {
+  if (!settings.value.compact) return
+  settings.value = await window.overlayApi.setCompact(false)
+}
+
 async function toggleClickThrough(): Promise<void> {
   settings.value = await window.overlayApi.toggleClickThrough()
 }
@@ -237,10 +332,9 @@ function onKeydown(event: KeyboardEvent): void {
   if (settings.value.clickThrough) return
   if (event.key === '1') setTab('dps')
   if (event.key === '2') setTab('skills')
-  if (event.key === '3') setTab('self')
-  if (event.key === '4') setTab('boss')
-  if (event.key === '5') setTab('buffs')
-  if (event.key === '6') setTab('shields')
+  if (event.key === '3') setTab('buffs')
+  if (event.key === '4') setTab('debuff')
+  if (event.key === '5') setTab('shields')
   if (event.key === 'F5') void refresh()
   if (event.key.toLowerCase() === 'l') void toggleLocked()
 }
@@ -279,7 +373,19 @@ async function syncOverlayHeight(): Promise<void> {
   await nextTick()
 
   let height: number
-  if (activeTab.value === 'dps') {
+  if (compact.value) {
+    // Thumbnail mode hides tabs + footer; size strictly to the measured content
+    // (titlebar + grid head + DPS rows) so the window stays as short as possible.
+    const measured = measureOverlayContentHeight(overlayRef.value)
+    const contentHeight = measured ?? OVERLAY_COMPACT_MIN_HEIGHT
+    rowsNeedScroll.value = contentHeight > OVERLAY_MAX_HEIGHT
+    height = Math.min(OVERLAY_MAX_HEIGHT, Math.max(OVERLAY_COMPACT_MIN_HEIGHT, contentHeight))
+  } else if (
+    activeTab.value === 'dps' ||
+    activeTab.value === 'shields' ||
+    activeTab.value === 'buffs' ||
+    activeTab.value === 'debuff'
+  ) {
     const measured = measureOverlayContentHeight(overlayRef.value)
     const fallback = computeOverlayHeight(visibleRows.value.length || 1, {
       maxRows: OVERLAY_ROW_LIMIT
@@ -303,6 +409,44 @@ async function syncOverlayHeight(): Promise<void> {
   await window.overlayApi.resizeToHeight(height)
 }
 
+// In click-through mode only the top-right button group should capture the
+// cursor; report its live rect to the main process (which polls the cursor and
+// toggles pointer pass-through). Everything else — combat info, footer hint —
+// stays pass-through so the player can't select it by accident.
+function reportInteractiveRects(): void {
+  if (!settings.value.clickThrough) {
+    window.overlayApi.setInteractiveRects([])
+    return
+  }
+  const el = titleRightRef.value
+  if (!el) {
+    window.overlayApi.setInteractiveRects([])
+    return
+  }
+  const rect = el.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) {
+    window.overlayApi.setInteractiveRects([])
+    return
+  }
+  const pad = 4
+  window.overlayApi.setInteractiveRects([
+    {
+      x: Math.max(0, Math.floor(rect.left - pad)),
+      y: Math.max(0, Math.floor(rect.top - pad)),
+      width: Math.ceil(rect.width + pad * 2),
+      height: Math.ceil(rect.height + pad * 2)
+    }
+  ])
+}
+
+function scheduleReportInteractiveRects(): void {
+  if (reportRectsFrame != null) return
+  reportRectsFrame = requestAnimationFrame(() => {
+    reportRectsFrame = null
+    reportInteractiveRects()
+  })
+}
+
 function onOverlayDragStart(event: MouseEvent): void {
   if (settings.value.locked || settings.value.clickThrough) return
   if ((event.target as HTMLElement | null)?.closest('.no-drag')) return
@@ -322,12 +466,26 @@ watch(
     if (!enabled) {
       window.overlayApi.setPointerPassthrough(false)
     }
+    scheduleReportInteractiveRects()
+  },
+  { immediate: true }
+)
+
+// Compact mode is DPS-only: drop any drilldown/other tab when it turns on.
+watch(
+  compact,
+  (enabled) => {
+    if (enabled) {
+      activeTab.value = 'dps'
+      selectedPlayer.value = null
+    }
+    scheduleSyncOverlayHeight()
   },
   { immediate: true }
 )
 
 watch(
-  [visibleRows, activeTab, selectedPlayer, () => settings.value.locked],
+  [visibleRows, activeTab, shieldTab, shieldTable, buffTable, debuffTable, selectedPlayer, () => settings.value.locked, compact],
   () => {
     scheduleSyncOverlayHeight()
   },
@@ -340,7 +498,14 @@ onMounted(async () => {
     settings.value = next
   })
   resizeObserver = new ResizeObserver(() => {
-    if (activeTab.value !== 'dps') return
+    if (
+      activeTab.value !== 'dps' &&
+      activeTab.value !== 'shields' &&
+      activeTab.value !== 'buffs' &&
+      activeTab.value !== 'debuff'
+    ) {
+      return
+    }
     scheduleSyncOverlayHeight()
   })
   await refresh()
@@ -353,16 +518,25 @@ onMounted(async () => {
     const rowsEl = overlayRef.value.querySelector('.rows')
     if (rowsEl) resizeObserver.observe(rowsEl)
   }
+  // The button group's size (timer text, projection chip) and position (window
+  // width) both shift the interactive rect; re-report on either change.
+  titleRightResizeObserver = new ResizeObserver(() => scheduleReportInteractiveRects())
+  if (titleRightRef.value) titleRightResizeObserver.observe(titleRightRef.value)
+  window.addEventListener('resize', scheduleReportInteractiveRects)
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('mouseup', onOverlayDragEnd)
+  scheduleReportInteractiveRects()
 })
 
 onUnmounted(() => {
   removeStateListener?.()
   if (opacityTimer) clearTimeout(opacityTimer)
   if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer)
+  if (reportRectsFrame != null) cancelAnimationFrame(reportRectsFrame)
   resizeObserver?.disconnect()
+  titleRightResizeObserver?.disconnect()
   removeSettingsListener?.()
+  window.removeEventListener('resize', scheduleReportInteractiveRects)
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('mouseup', onOverlayDragEnd)
 })
@@ -375,7 +549,8 @@ onUnmounted(() => {
     :class="{
       locked: settings.locked,
       'click-through': settings.clickThrough,
-      'rows-scroll': rowsNeedScroll
+      'rows-scroll': rowsNeedScroll,
+      compact: compact
     }"
   >
     <header
@@ -391,63 +566,120 @@ onUnmounted(() => {
             :title="statusIndicator.label"
             :aria-label="statusIndicator.label"
           />
-          <span class="brand">LOA METER</span>
+          <span v-if="!compact" class="brand">LOA METER</span>
+          <span v-if="projectedEncounter" class="projection-chip" title="正在投射历史战斗记录">历史投射</span>
         </div>
+        <span v-if="raidTitle" class="raid-line" :title="raidTitle">{{ raidTitle }}</span>
         <span class="boss-line">
           <span class="boss">{{ bossTitle }}</span>
-          <span v-if="state?.bossGateName" class="gate"> · {{ state.bossGateName }}</span>
+          <span v-if="!raidTitle && state?.bossGateName" class="gate"> · {{ state.bossGateName }}</span>
           <span v-if="state?.bossDifficulty" class="gate"> · {{ state.bossDifficulty }}</span>
         </span>
         <span v-if="state && state.totalDamage > 0" class="summary">
-          总伤 {{ formatDamage(state.totalDamage) }} · DPS {{ formatDamage(Math.round(state.dps)) }}/秒
+          总伤 {{ formatDamage(state.totalDamage) }} · DPS {{ formatDamage(Math.round(state.dps)) }}/秒<span
+            v-if="state.shieldDamage > 0"
+            class="shield-summary"
+            title="对 Boss 护盾造成的伤害 (已计入总伤)"
+          > · 盾伤 {{ formatDamage(state.shieldDamage) }}</span>
         </span>
       </div>
-      <div class="title-right no-drag">
+      <div ref="titleRightRef" class="title-right no-drag">
         <span class="timer">{{ state ? formatDuration(state.elapsedSeconds) : '00:00' }}</span>
         <button
+          v-if="projectedEncounter"
           type="button"
-          class="icon-btn"
-          :class="{ active: refreshing }"
-          title="手动刷新 (F5)"
-          :disabled="refreshing"
+          class="icon-btn projection-exit"
+          title="退出历史投射，恢复实时数据"
           @mousedown.stop
-          @click.stop="refresh()"
+          @click.stop="exitProjection()"
         >
-          ↻
+          ↩
         </button>
-        <button
-          type="button"
-          class="icon-btn"
-          :class="{ active: settings.locked }"
-          :title="settings.locked ? '已锁定（不可拖动/缩放）' : '锁定位置'"
-          @mousedown.stop
-          @click.stop="toggleLocked()"
-        >
-          {{ settings.locked ? '🔒' : '🔓' }}
-        </button>
-        <button
-          type="button"
-          class="icon-btn"
-          :class="{ active: settings.clickThrough }"
-          title="点击穿透（Ctrl+Shift+M）"
-          @mousedown.stop
-          @click.stop="toggleClickThrough()"
-        >
-          ◌
-        </button>
-        <button
-          type="button"
-          class="icon-btn danger"
-          title="关闭悬浮窗（Esc）"
-          @mousedown.stop
-          @click.stop="closeOverlay()"
-        >
-          ✕
-        </button>
+        <template v-if="!compact">
+          <button
+            type="button"
+            class="icon-btn"
+            :class="{ active: refreshing }"
+            title="手动刷新 (F5)"
+            :disabled="refreshing"
+            @mousedown.stop
+            @click.stop="refresh()"
+          >
+            ↻
+          </button>
+          <button
+            type="button"
+            class="icon-btn"
+            :class="{ active: settings.locked }"
+            :title="settings.locked ? '已锁定（不可拖动/缩放）' : '锁定位置'"
+            @mousedown.stop
+            @click.stop="toggleLocked()"
+          >
+            {{ settings.locked ? '🔒' : '🔓' }}
+          </button>
+          <button
+            type="button"
+            class="icon-btn"
+            :class="{ active: settings.clickThrough }"
+            title="点击穿透（Ctrl+Shift+M）"
+            @mousedown.stop
+            @click.stop="toggleClickThrough()"
+          >
+            ◌
+          </button>
+          <button
+            type="button"
+            class="icon-btn"
+            title="缩略：只保留关卡/时长 + 紧凑 DPS 列表的小窗口"
+            @mousedown.stop
+            @click.stop="toggleCompact()"
+          >
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 4v5H4" />
+              <path d="M15 20v-5h5" />
+              <path d="M20 9h-5V4" />
+              <path d="M4 15h5v5" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="icon-btn danger"
+            title="关闭悬浮窗（Esc）"
+            @mousedown.stop
+            @click.stop="closeOverlay()"
+          >
+            ✕
+          </button>
+        </template>
+        <template v-else>
+          <button
+            type="button"
+            class="icon-btn compact-control"
+            title="展开完整悬浮窗，查看技能/增益/护盾等详情"
+            @mousedown.stop
+            @click.stop="expandFromCompact()"
+          >
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 9V4h5" />
+              <path d="M20 15v5h-5" />
+              <path d="M15 4h5v5" />
+              <path d="M9 20H4v-5" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="icon-btn danger compact-control"
+            title="关闭悬浮窗（Esc）"
+            @mousedown.stop
+            @click.stop="closeOverlay()"
+          >
+            ✕
+          </button>
+        </template>
       </div>
     </header>
 
-    <nav class="tabs no-drag interactive">
+    <nav v-if="!compact" class="tabs no-drag interactive">
       <button
         v-for="tab in OVERLAY_TABS"
         :key="tab.id"
@@ -470,79 +702,230 @@ onUnmounted(() => {
     <section v-if="!isCustomTab" class="grid-head" :class="{ 'grid-head--skills': showSkillStatColumns }">
       <span>{{ nameColumnLabel }}</span>
       <span>伤害</span>
-      <span v-if="showSkillStatColumns">占比</span>
-      <span v-else>DPS</span>
-      <span v-if="showSkillStatColumns">暴击</span>
-      <span v-else>占比</span>
+      <span title="对 Boss 护盾造成的伤害 (已计入伤害)">盾伤</span>
+      <span title="对 Boss 造成的瘫痪值 (record+0x3c)">瘫痪</span>
       <template v-if="showSkillStatColumns">
-        <span>命中</span>
+        <span>占比</span>
+        <span>暴击</span>
         <span>背击</span>
         <span>头击</span>
+      </template>
+      <template v-else>
+        <span>DPS</span>
+        <span>占比</span>
       </template>
     </section>
 
     <template v-if="activeTab === 'buffs'">
-      <section v-if="buffTable" class="grid-head grid-head--buffs" :style="{ '--buff-cols': buffTable.columns.length }">
-        <span>玩家</span>
-        <span v-for="column in buffTable.columns" :key="column.key" class="buff-col" :title="column.label">
-          {{ column.label }}
-        </span>
-      </section>
-      <section class="rows">
-        <p v-if="!buffTable || !buffTable.rows.length" class="empty">{{ emptyMessage }}</p>
-        <div v-else class="row-list">
-          <article
-            v-for="row in buffTable.rows"
-            :key="`buff-${row.sourceId}`"
-            class="row"
+      <section class="rows shield-rows">
+        <p v-if="!buffTable || !buffTable.parties.length" class="empty">{{ emptyMessage }}</p>
+        <template v-else>
+          <div
+            v-for="party in buffTable.parties"
+            :key="`buff-party-${party.key}`"
+            class="shield-party"
           >
-            <div class="cells cells--buffs" :style="{ '--buff-cols': buffTable.columns.length }">
-              <span class="identity" :title="row.label">
-                <ClassIcon :class-id="row.classId" :size="20" :title="row.label" />
-                <span class="name">{{ row.label }}</span>
-              </span>
-              <span
-                v-for="(cell, index) in row.cells"
-                :key="buffTable.columns[index].key"
-                class="num"
-                :class="cell != null && cell >= 0.85 ? 'buff-high' : cell != null && cell >= 0.5 ? 'buff-mid' : ''"
+            <header v-if="party.label" class="shield-party-head">{{ party.label }}</header>
+            <div class="buff-matrix-scroll">
+              <div
+                class="grid-head grid-head--buff-matrix"
+                :style="{ '--buff-cols': party.columns.length }"
               >
-                {{ cell != null ? `${Math.round(cell * 100)}%` : '–' }}
-              </span>
+                <span>玩家</span>
+                <span
+                  v-for="column in party.columns"
+                  :key="`col-${party.key}-${column.key}`"
+                  class="shield-col"
+                  :title="column.label"
+                >
+                  <SkillIcon :skill-icon="column.icon" :size="16" :title="column.label" />
+                </span>
+              </div>
+              <div class="row-list">
+                <article
+                  v-for="row in party.rows"
+                  :key="`buff-${party.key}-${row.sourceId}`"
+                  class="row"
+                  :style="shieldRowStyle(row)"
+                >
+                  <div class="bar" />
+                  <div
+                    class="cells cells--buff-matrix"
+                    :style="{ '--buff-cols': party.columns.length }"
+                  >
+                    <span class="identity" :title="row.label">
+                      <ClassIcon :class-id="row.classId" :size="18" :title="row.label" />
+                      <span class="name">{{ row.label }}</span>
+                    </span>
+                    <span
+                      v-for="(cell, index) in row.cells"
+                      :key="`cell-${party.columns[index].key}`"
+                      class="num"
+                      :class="cell != null && cell >= 0.85 ? 'buff-high' : cell != null && cell >= 0.5 ? 'buff-mid' : ''"
+                    >
+                      {{ buffCellText(cell) }}
+                    </span>
+                  </div>
+                </article>
+              </div>
             </div>
-          </article>
+          </div>
+        </template>
+      </section>
+    </template>
+
+    <template v-else-if="activeTab === 'debuff'">
+      <section class="rows shield-rows">
+        <div
+          v-if="defenseBreakCounts && defenseBreakCounts.parties.length"
+          class="defbreak-panel"
+        >
+          <header class="defbreak-title">破坏防御 · 施加次数</header>
+          <div class="defbreak-parties">
+            <div
+              v-for="party in defenseBreakCounts.parties"
+              :key="`defbreak-${party.key}`"
+              class="defbreak-party"
+            >
+              <header class="defbreak-party-head">{{ party.label }}</header>
+              <div class="defbreak-members">
+                <span
+                  v-for="member in party.members"
+                  :key="`defbreak-${party.key}-${member.sourceId}`"
+                  class="defbreak-member"
+                  :title="`${member.label} × ${member.count}`"
+                >
+                  <ClassIcon :class-id="member.classId" :size="18" :title="member.label" />
+                  <span class="defbreak-count">×{{ member.count }}</span>
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
+        <p v-if="!debuffTable || !debuffTable.parties.length" class="empty">{{ emptyMessage }}</p>
+        <template v-else>
+          <div
+            v-for="party in debuffTable.parties"
+            :key="`debuff-party-${party.key}`"
+            class="shield-party"
+          >
+            <header v-if="party.label" class="shield-party-head">{{ party.label }}</header>
+            <div class="buff-matrix-scroll">
+              <div
+                class="grid-head grid-head--buff-matrix"
+                :style="{ '--buff-cols': party.columns.length }"
+              >
+                <span>玩家</span>
+                <span
+                  v-for="column in party.columns"
+                  :key="`col-${party.key}-${column.key}`"
+                  class="shield-col"
+                  :title="column.tooltip ?? column.label"
+                >
+                  <SkillIcon :skill-icon="column.icon" :size="16" :title="column.tooltip ?? column.label" />
+                </span>
+              </div>
+              <div class="row-list">
+                <article
+                  v-for="row in party.rows"
+                  :key="`debuff-${party.key}-${row.sourceId}`"
+                  class="row"
+                  :style="shieldRowStyle(row)"
+                >
+                  <div class="bar" />
+                  <div
+                    class="cells cells--buff-matrix"
+                    :style="{ '--buff-cols': party.columns.length }"
+                  >
+                    <span class="identity" :title="row.label">
+                      <ClassIcon :class-id="row.classId" :size="18" :title="row.label" />
+                      <span class="name">{{ row.label }}</span>
+                    </span>
+                    <span
+                      v-for="(cell, index) in row.cells"
+                      :key="`cell-${party.columns[index].key}`"
+                      class="num"
+                      :class="cell != null && cell >= 0.85 ? 'buff-high' : cell != null && cell >= 0.5 ? 'buff-mid' : ''"
+                    >
+                      {{ buffCellText(cell) }}
+                    </span>
+                  </div>
+                </article>
+              </div>
+            </div>
+          </div>
+        </template>
       </section>
     </template>
 
     <template v-else-if="activeTab === 'shields'">
-      <section class="grid-head grid-head--shields">
-        <span>玩家</span>
-        <span title="施放的护盾总量">给予</span>
-        <span title="获得的护盾总量">获得</span>
-        <span title="施放护盾实际吸收">有效给予</span>
-        <span title="自身护盾实际吸收">有效吸收</span>
-      </section>
-      <section class="rows">
-        <p v-if="!shieldRows.length" class="empty">{{ emptyMessage }}</p>
-        <div v-else class="row-list">
-          <article
-            v-for="row in shieldRows"
-            :key="`shield-${row.sourceId}`"
-            class="row"
+      <nav class="shield-subtabs no-drag interactive">
+        <button
+          v-for="tab in OVERLAY_SHIELD_TABS"
+          :key="tab.id"
+          type="button"
+          class="shield-subtab"
+          :class="{ active: shieldTab === tab.id }"
+          :title="tab.title"
+          @mousedown.stop
+          @click.stop="setShieldTab(tab.id)"
+        >
+          {{ tab.label }}
+        </button>
+      </nav>
+      <section class="rows shield-rows">
+        <p v-if="!shieldTable || !shieldTable.parties.length" class="empty">{{ emptyMessage }}</p>
+        <template v-else>
+          <div
+            v-for="party in shieldTable.parties"
+            :key="`shield-party-${party.key}`"
+            class="shield-party"
           >
-            <div class="cells cells--shields">
-              <span class="identity" :title="row.label">
-                <ClassIcon :class-id="row.classId" :size="20" :title="row.label" />
-                <span class="name">{{ row.label }}</span>
+            <header v-if="party.label" class="shield-party-head">{{ party.label }}</header>
+            <div
+              class="grid-head grid-head--shield-matrix"
+              :style="{ '--shield-cols': party.columns.length }"
+            >
+              <span>玩家</span>
+              <span class="num">合计</span>
+              <span
+                v-for="column in party.columns"
+                :key="column.key"
+                class="shield-col"
+                :title="column.label"
+              >
+                <SkillIcon :skill-icon="column.icon" :size="18" :title="column.label" />
               </span>
-              <span class="num">{{ formatDamage(row.shieldGiven) }}</span>
-              <span class="num">{{ formatDamage(row.shieldReceived) }}</span>
-              <span class="num buff-high">{{ formatDamage(row.effectiveShieldGiven) }}</span>
-              <span class="num">{{ formatDamage(row.effectiveShieldReceived) }}</span>
             </div>
-          </article>
-        </div>
+            <div class="row-list">
+              <article
+                v-for="row in party.rows"
+                :key="`shield-${party.key}-${row.sourceId}`"
+                class="row"
+                :style="shieldRowStyle(row)"
+              >
+                <div class="bar" />
+                <div
+                  class="cells cells--shield-matrix"
+                  :style="{ '--shield-cols': party.columns.length }"
+                >
+                  <span class="identity" :title="row.label">
+                    <ClassIcon :class-id="row.classId" :size="20" :title="row.label" />
+                    <span class="name">{{ row.label }}</span>
+                  </span>
+                  <span class="num shield-total">{{ row.total > 0 ? formatDamage(row.total) : '–' }}</span>
+                  <span
+                    v-for="(cell, index) in row.cells"
+                    :key="party.columns[index].key"
+                    class="num"
+                  >
+                    {{ cell != null ? formatDamage(cell) : '–' }}
+                  </span>
+                </div>
+              </article>
+            </div>
+          </div>
+        </template>
       </section>
     </template>
 
@@ -566,19 +949,26 @@ onUnmounted(() => {
                 :size="22"
                 :title="row.label"
               />
+              <SkillIcon
+                v-else-if="row.isEsther"
+                :skill-icon="row.estherIcon"
+                :size="compact ? 16 : 22"
+                :title="row.label"
+              />
               <ClassIcon
                 v-else
                 :class-id="row.classId"
-                :size="22"
+                :size="compact ? 16 : 22"
                 :title="row.label"
               />
               <span class="name">{{ row.label }}</span>
             </span>
             <span class="num">{{ formatDamage(row.damage) }}</span>
+            <span class="num shield">{{ row.shieldDamage > 0 ? formatDamage(row.shieldDamage) : '–' }}</span>
+            <span class="num stagger">{{ row.stagger > 0 ? formatDamage(row.stagger) : '–' }}</span>
             <template v-if="showSkillStatColumns">
               <span class="num share">{{ formatShare(row.share) }}</span>
               <span class="num">{{ formatPercent(row.critRate) }}</span>
-              <span class="num">{{ formatOptionalPercent(row.hitRate) }}</span>
               <span class="num">{{ formatOptionalPercent(row.backAttackRate) }}</span>
               <span class="num">{{ formatOptionalPercent(row.headAttackRate) }}</span>
             </template>
@@ -591,7 +981,7 @@ onUnmounted(() => {
       </TransitionGroup>
     </section>
 
-    <footer class="footer no-drag interactive">
+    <footer v-if="!compact" class="footer no-drag interactive">
       <label class="opacity-control" title="窗口透明度">
         <span>透明度</span>
         <input
@@ -717,6 +1107,32 @@ onUnmounted(() => {
   color: #f4f4f5;
 }
 
+.projection-chip {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.55);
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 1.3;
+}
+
+.icon-btn.projection-exit {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.45);
+}
+
+.raid-line {
+  font-size: 10px;
+  font-weight: 600;
+  color: #93c5fd;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .boss-line {
   display: flex;
   align-items: baseline;
@@ -749,6 +1165,10 @@ onUnmounted(() => {
   font-variant-numeric: tabular-nums;
 }
 
+.shield-summary {
+  color: #7dd3fc;
+}
+
 .title-right {
   display: flex;
   align-items: center;
@@ -771,6 +1191,9 @@ onUnmounted(() => {
 }
 
 .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 26px;
   height: 24px;
   border: 1px solid transparent;
@@ -781,6 +1204,10 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 1;
   padding: 0;
+}
+
+.icon-btn svg {
+  display: block;
 }
 
 .icon-btn:hover:not(:disabled) {
@@ -838,42 +1265,196 @@ onUnmounted(() => {
 .grid-head,
 .row .cells {
   display: grid;
-  grid-template-columns: minmax(0, 1.55fr) 0.82fr 0.72fr 0.48fr;
+  grid-template-columns: minmax(0, 1.45fr) 0.78fr 0.68fr 0.6fr 0.7fr 0.46fr;
   gap: 8px;
   align-items: center;
 }
 
 .grid-head--skills,
 .row .cells--skills {
-  grid-template-columns: minmax(0, 1.35fr) 0.72fr 0.42fr 0.42fr 0.42fr 0.42fr 0.42fr;
+  grid-template-columns: minmax(0, 1.3fr) 0.66fr 0.6fr 0.5fr 0.42fr 0.42fr 0.42fr 0.42fr;
   gap: 5px;
   font-size: 9px;
+}
+
+.row .num.shield {
+  color: #7dd3fc;
+}
+
+.row .num.stagger {
+  color: #f0b860;
 }
 
 .grid-head--skills {
   font-size: 9px;
 }
 
-.grid-head--buffs,
-.row .cells--buffs {
-  grid-template-columns: minmax(0, 1.4fr) repeat(var(--buff-cols, 4), minmax(0, 0.62fr));
-  gap: 5px;
+/* Buff matrix: the name column stays put while the (capped) synergy columns
+   stretch to share the remaining row width evenly. The BUFF tab is limited to
+   the top 8 icons, so `minmax(30px, 1fr)` spreads them left→right across the
+   full width instead of clustering at the left with dead space. The 30px floor
+   keeps the percentage values legible; if the overlay is too narrow to fit the
+   floors, `min-width: max-content` forces the natural width and
+   .buff-matrix-scroll scrolls horizontally.
+
+   The name column is a FIXED width (not a flexible fr track) so the header grid
+   and every row grid share identical column geometry — a long player label is
+   clipped with an ellipsis (.name has overflow/ellipsis) and shown in full on
+   hover via the cell's `title`, rather than widening one row out of alignment.
+   With `width: 100%` every grid (header + each row) resolves to the same
+   containing width, so the `1fr` tracks line up. */
+.grid-head--buff-matrix,
+.row .cells--buff-matrix {
+  grid-template-columns: var(--buff-name-col, 160px) repeat(var(--buff-cols, 4), minmax(30px, 1fr));
+  gap: 2px;
+  width: 100%;
+  min-width: max-content;
 }
 
-.grid-head--buffs {
+.buff-matrix-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.buff-matrix-scroll .row-list {
+  width: 100%;
+  min-width: max-content;
+}
+
+.grid-head--buff-matrix {
   font-size: 9px;
+  border-bottom: 1px solid rgba(63, 63, 70, 0.45);
 }
 
-.grid-head--buffs .buff-col {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.grid-head--buff-matrix .shield-col {
+  display: flex;
+  justify-content: center;
 }
 
-.grid-head--shields,
-.row .cells--shields {
-  grid-template-columns: minmax(0, 1.4fr) 0.62fr 0.62fr 0.72fr 0.72fr;
-  gap: 5px;
+.cells--buff-matrix .num {
+  font-size: 9px;
+  text-align: center;
+  padding: 0;
+}
+
+.shield-subtabs {
+  display: flex;
+  gap: 3px;
+  padding: 4px 8px;
+  background: rgba(24, 24, 27, 0.85);
+  border-bottom: 1px solid rgba(63, 63, 70, 0.55);
+}
+
+.shield-subtab {
+  border: 0;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #71717a;
+  background: transparent;
+  cursor: pointer;
+}
+
+.shield-subtab:hover {
+  color: #d4d4d8;
+  background: rgba(63, 63, 70, 0.55);
+}
+
+.shield-subtab.active {
+  color: #fafafa;
+  background: rgba(82, 82, 91, 0.95);
+}
+
+.shield-party {
+  margin-bottom: 6px;
+}
+
+.shield-party-head {
+  padding: 3px 10px 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #93c5fd;
+}
+
+.defbreak-panel {
+  margin: 2px 6px 8px;
+  padding: 4px 6px 6px;
+  border: 1px solid rgba(248, 180, 95, 0.28);
+  border-radius: 6px;
+  background: rgba(120, 72, 20, 0.16);
+}
+
+.defbreak-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #f8b45f;
+  margin-bottom: 4px;
+}
+
+.defbreak-parties {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.defbreak-party {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.defbreak-party-head {
+  font-size: 9px;
+  font-weight: 700;
+  color: #93c5fd;
+  margin-bottom: 3px;
+}
+
+.defbreak-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+
+.defbreak-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.defbreak-count {
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #fde6c4;
+}
+
+.grid-head--shield-matrix,
+.row .cells--shield-matrix {
+  grid-template-columns:
+    minmax(0, 1.35fr) 0.68fr repeat(var(--shield-cols, 4), minmax(0, 0.58fr));
+  gap: 4px;
+}
+
+.grid-head--shield-matrix {
+  font-size: 9px;
+  border-bottom: 1px solid rgba(63, 63, 70, 0.45);
+}
+
+.grid-head--shield-matrix .shield-col {
+  display: flex;
+  justify-content: center;
+}
+
+.shield-total {
+  font-weight: 600;
+  color: #7ddf8f;
+}
+
+.cells--shield-matrix .num {
+  font-size: 10px;
 }
 
 .buff-high {
@@ -895,8 +1476,23 @@ onUnmounted(() => {
 
 .grid-head span:not(:first-child),
 .row .num {
-  text-align: right;
+  text-align: center;
   font-variant-numeric: tabular-nums;
+}
+
+/* Keep the data columns visually centered: icon header cells and the value
+   cells share the same centered alignment so columns no longer look ragged. */
+.grid-head .shield-col,
+.cells .shield-col {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.row .cells .num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .rows {
@@ -1067,6 +1663,76 @@ onUnmounted(() => {
   font-size: 10px;
   color: #71717a;
   white-space: nowrap;
+}
+
+/* 缩略模式：收窄高度、缩小字体，仅保留标题栏 + 紧凑 DPS 列表 */
+.meter-overlay.compact {
+  border-radius: 6px;
+}
+
+.meter-overlay.compact .titlebar {
+  padding: 4px 8px 3px;
+  gap: 6px;
+}
+
+.meter-overlay.compact .title-left {
+  gap: 1px;
+}
+
+.meter-overlay.compact .raid-line {
+  font-size: 9px;
+}
+
+.meter-overlay.compact .boss,
+.meter-overlay.compact .gate {
+  font-size: 10px;
+}
+
+.meter-overlay.compact .summary {
+  font-size: 8px;
+}
+
+.meter-overlay.compact .timer {
+  font-size: 9px;
+  margin-right: 2px;
+}
+
+.meter-overlay.compact .title-right {
+  gap: 2px;
+}
+
+.meter-overlay.compact .icon-btn {
+  width: 20px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.meter-overlay.compact .icon-btn svg {
+  width: 11px;
+  height: 11px;
+}
+
+.meter-overlay.compact .grid-head {
+  padding: 2px 8px 3px;
+  font-size: 8px;
+}
+
+.meter-overlay.compact .rows {
+  padding: 2px 6px 4px;
+}
+
+.meter-overlay.compact .row {
+  margin-bottom: 2px;
+  min-height: 19px;
+}
+
+.meter-overlay.compact .row .cells {
+  padding: 2px 8px;
+  font-size: 9px;
+}
+
+.meter-overlay.compact .identity {
+  gap: 4px;
 }
 
 .meter-overlay.locked,

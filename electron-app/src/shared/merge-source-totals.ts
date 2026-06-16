@@ -81,6 +81,7 @@ function mergeSkillBreakdownRows(skillRows: SourceTotalRow[]): SourceTotalRow[] 
   for (const rows of grouped.values()) {
     const base = { ...rows[0] }
     base.totalDamage = rows.reduce((sum, row) => sum + (coerceInt(row.totalDamage) ?? 0), 0)
+    base.stagger = rows.reduce((sum, row) => sum + (coerceInt(row.stagger) ?? 0), 0)
     base.hitCount = rows.reduce((sum, row) => sum + (coerceInt(row.hitCount) ?? 0), 0)
     base.critCount = rows.reduce((sum, row) => sum + (coerceInt(row.critCount) ?? 0), 0)
     const hitCount = coerceInt(base.hitCount) ?? 0
@@ -103,7 +104,7 @@ function mergeSkillBreakdownRows(skillRows: SourceTotalRow[]): SourceTotalRow[] 
     base.headAttackCount = headAttackCount
     base.frontAttackCount = frontAttackCount
     base.modifierHitCount = modifierHitCount
-    const modifierDenom = hitCount > 0 ? hitCount : modifierHitCount
+    const modifierDenom = modifierHitCount > 0 ? modifierHitCount : hitCount
     base.backAttackRate =
       modifierDenom > 0 ? Math.round((backAttackCount / modifierDenom) * 1_000_000) / 1_000_000 : null
     base.headAttackRate =
@@ -183,6 +184,7 @@ export function mergeSourceTotalRowsByPlayerIdentity(rows: SourceTotalRow[]): So
 
     const combined: SourceTotalRow = { ...canonical }
     combined.totalDamage = group.reduce((sum, row) => sum + (coerceInt(row.totalDamage) ?? 0), 0)
+    combined.stagger = group.reduce((sum, row) => sum + (coerceInt(row.stagger) ?? 0), 0)
     combined.hitCount = group.reduce((sum, row) => sum + (coerceInt(row.hitCount) ?? 0), 0)
     combined.critCount = group.reduce((sum, row) => sum + (coerceInt(row.critCount) ?? 0), 0)
     const hitCount = coerceInt(combined.hitCount) ?? 0

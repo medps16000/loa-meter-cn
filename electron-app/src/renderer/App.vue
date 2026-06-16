@@ -1,9 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
 import EncounterHistoryView from './views/EncounterHistoryView.vue'
-import LiveMeterView from './views/LiveMeterView.vue'
-
-const tab = ref<'live' | 'history'>('live')
 
 async function toggleOverlayClickThrough(): Promise<void> {
   const settings = await window.overlayApi.toggleClickThrough()
@@ -18,22 +14,11 @@ async function toggleOverlayClickThrough(): Promise<void> {
 <template>
   <div class="app">
     <header class="topbar">
-      <h1>LOA METER CN</h1>
+      <div class="brand">
+        <h1>LOA METER CN</h1>
+        <span class="subtitle">战斗查询 · 实时数据在悬浮窗显示</span>
+      </div>
       <nav>
-        <button
-          type="button"
-          :class="{ active: tab === 'live' }"
-          @click="tab = 'live'"
-        >
-          实时
-        </button>
-        <button
-          type="button"
-          :class="{ active: tab === 'history' }"
-          @click="tab = 'history'"
-        >
-          历史
-        </button>
         <button type="button" class="ghost" @click="toggleOverlayClickThrough()">
           浮窗穿透
         </button>
@@ -41,8 +26,7 @@ async function toggleOverlayClickThrough(): Promise<void> {
     </header>
 
     <main>
-      <LiveMeterView v-if="tab === 'live'" />
-      <EncounterHistoryView v-else />
+      <EncounterHistoryView />
     </main>
   </div>
 </template>
@@ -63,9 +47,20 @@ async function toggleOverlayClickThrough(): Promise<void> {
   background: #171b24;
 }
 
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .topbar h1 {
   margin: 0;
   font-size: 18px;
+}
+
+.subtitle {
+  font-size: 12px;
+  color: #7f8aa3;
 }
 
 nav {
@@ -73,13 +68,7 @@ nav {
   gap: 8px;
 }
 
-nav button.active {
-  background: #3d4f78;
-  border-color: #5b74ad;
-}
-
 nav button.ghost {
-  margin-left: 8px;
   font-size: 12px;
 }
 

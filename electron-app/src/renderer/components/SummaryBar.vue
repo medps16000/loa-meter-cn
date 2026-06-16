@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { bossTitleText, type DisplayState } from '../lib/meter-display'
+import { bossTitleText, raidTitleText, type DisplayState } from '../lib/meter-display'
 import { formatDamage, formatDuration, formatPercent } from '../lib/format'
 
 defineProps<{
@@ -12,10 +12,14 @@ defineProps<{
     <div class="title">
       <template v-if="display.historicalFromRecord">历史记录</template>
       <template v-else>当前战斗</template>
-      · {{ bossTitleText(display) }}<span v-if="display.bossGateName" class="gate"> · {{ display.bossGateName }}</span><span v-if="display.bossDifficulty" class="gate"> · {{ display.bossDifficulty }}</span>
+      <span v-if="raidTitleText(display)" class="raid"> · {{ raidTitleText(display) }}</span>
+      · {{ bossTitleText(display) }}<span v-if="!display.bossRaidName && display.bossGateName" class="gate"> · {{ display.bossGateName }}</span><span v-if="display.bossDifficulty" class="gate"> · {{ display.bossDifficulty }}</span>
     </div>
     <div class="metrics">
       <div><span class="muted">总伤害</span><strong>{{ formatDamage(display.totalDamage) }}</strong></div>
+      <div v-if="display.shieldDamage > 0" class="shield-metric" title="对 Boss 护盾造成的伤害（已计入总伤害）">
+        <span class="muted">盾伤</span><strong>{{ formatDamage(display.shieldDamage) }}</strong>
+      </div>
       <div><span class="muted">DPS</span><strong>{{ formatDamage(display.dps) }}/秒</strong></div>
       <div><span class="muted">时长</span><strong>{{ formatDuration(display.durationSeconds) }}</strong></div>
       <div><span class="muted">命中</span><strong>{{ display.hitCount }}</strong></div>
@@ -53,10 +57,14 @@ defineProps<{
   font-weight: 600;
 }
 
+.title .raid {
+  color: #8ab8f0;
+}
+
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
   gap: 10px;
 }
 
@@ -64,6 +72,10 @@ defineProps<{
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.metrics .shield-metric strong {
+  color: #7dd3fc;
 }
 
 .warning-text,
